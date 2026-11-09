@@ -1,11 +1,11 @@
 import { runCheck } from '../utils/scheduler'
 import { refetchOfficial } from '../scrape/official'
 import { warmupRates } from '../utils/rates'
-import { flushMongo } from '../utils/mongodb'
+import { sqliteStats } from '../utils/sqlite'
 
 /**
- * 每日任务聚合：检测 → 官方套餐抓取 → 汇率刷新 → 刷盘
- * 给 Cloudflare Cron / GitHub Actions / 任意外部调度器调用。
+ * 每日任务聚合：检测 → 官方套餐抓取 → 汇率刷新
+ * 给外部 cron（服务器 crontab / host cron）调用 POST /api/cron。
  * 每步独立 try/catch，任一失败不阻断其余步骤。
  */
 export interface CronResult {
@@ -13,7 +13,7 @@ export interface CronResult {
   check: { up: number; down: number; total: number } | null
   refetch: { ok: string[]; fail: string[]; totalPlans: number } | null
   rates: { usdCny: number; source: string } | null
-  storage: 'mongodb' | 'filesystem'
+  storage: { backend: 'sqlite'; rows: number }
   errors: string[]
 }
 
@@ -24,7 +24,7 @@ export async function runDailyJob(): Promise<CronResult> {
     check: null,
     refetch: null,
     rates: null,
-    storage: process.env.MONGODB_URI ? 'mongodb' : 'filesystem',
+    storage: { backend: 'sqlite', rows: sqliteStats().rows },
     errors
   }
 
@@ -49,12 +49,6 @@ export async function runDailyJob(): Promise<CronResult> {
     errors.push(`rates: ${(e as Error).message}`)
   }
 
-  // 把内存里的脏数据一次性刷到 Mongo（保证 cron 跑完数据真落库）
-  try {
-    await flushMongo()
-  } catch (e) {
-    errors.push(`flush: ${(e as Error).message}`)
-  }
-
+  out.storage.rows = sqliteStats().rows
   return out
 }

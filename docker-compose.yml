@@ -1,0 +1,53 @@
+# 1核1G 自建机部署 —— docker compose 一条命令起
+#
+# 用法：
+#   1. 在服务器上：git clone https://github.com/ice-a/vpsls.git && cd vpsls
+#   2. （可选）改 .env 里的端口 / 密钥
+#   3. docker compose up -d --build
+#   4. 访问 http://服务器IP:3000
+#
+# 资源约束写死：容器最多用 0.8 核 / 400MB，跑满也不会把 1G 机器拖死。
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: vpsls
+    restart: unless-stopped
+    ports:
+      - "${APP_PORT:-3000}:3000"
+    environment:
+      TZ: Asia/Shanghai
+      NODE_ENV: production
+      # 限制 V8 堆，超过就 GC 而不是吃满机器
+      NODE_OPTIONS: "--max-old-space-size=256"
+      # SQLite 落在挂载卷里，重建容器不丢
+      SQLITE_PATH: /data/vpsls.db
+      # 每日任务接口密钥（外部 cron 调 /api/cron 时带 ?key=）
+      CRON_SECRET: "${CRON_SECRET:-change-me-please}"
+    volumes:
+      - vpsls-data:/data
+    # 资源上限：给 OS 和 Docker 留足剩余
+    deploy:
+      resources:
+        limits:
+          cpus: "0.80"
+          memory: 400M
+        reservations:
+          memory: 128M
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/storage').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 60s
+      timeout: 10s
+      start_period: 30s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+
+volumes:
+  vpsls-data:
+    driver: local

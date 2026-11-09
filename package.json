@@ -7,14 +7,11 @@
     "build": "nuxt build",
     "start": "node .output/server/index.mjs",
     "preview": "nuxt build && node .output/server/index.mjs",
-    "build:cf": "nuxi build --preset cloudflare_pages",
-    "deploy:cf": "pnpm build:cf && wrangler pages deploy dist --project-name=vpsls",
     "postinstall": "nuxt prepare"
   },
   "dependencies": {
     "@fontsource/chakra-petch": "^5.3.0",
     "@fontsource/ibm-plex-mono": "^5.3.0",
-    "mongodb": "^7.8.0",
     "nuxt": "^4.6.4",
     "vue": "^3.5.45",
     "vue-router": "^5.4.0"

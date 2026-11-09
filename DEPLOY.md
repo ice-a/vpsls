@@ -1,151 +1,134 @@
-# Cloudflare Pages 部署（完整功能 · KV 版）
+# 部署到 1核1G 服务器（Docker Compose）
 
-代码已改造为**双后端**：本地/VPS 走文件，Cloudflare 走 KV。同一份代码两边都能跑。
+纯自建部署：**Node 内置 SQLite**（零外部数据库）、**Docker Compose 一条命令启动**、**资源限制写死**。
 
-## 一、存储层改造说明（已完成）
+## 一、资源实测（本机实跑，非估算）
 
-| 模块 | 文件 | 改动 |
-| --- | --- | --- |
-| 存储抽象 | [server/utils/storage.ts](server/utils/storage.ts) | 新增。`storageRead/storageWrite` 统一接口，Node 落地 `fs` |
-| KV 后端 | [server/utils/cloudflare-kv.ts](server/utils/cloudflare-kv.ts) | 新增。内存快照 + 异步回写 KV |
-| 检测状态 | [server/utils/db.ts](server/utils/db.ts) | `fs` → `storageRead/Write`，键 `state.json` |
-| 访问统计 | [server/utils/analytics.ts](server/utils/analytics.ts) | 同上，键 `analytics.json` |
-| 汇率 | [server/utils/rates.ts](server/utils/rates.ts) | 同上，键 `rates.json` |
-| 抓取缓存 | [server/scrape/fetch.ts](server/scrape/fetch.ts) | 同上，键 `official/html-cache.json` |
-| 官方套餐 | [server/scrape/official.ts](server/scrape/official.ts) | 同上，键 `official/plans.json` |
-| 每日任务 | [server/tasks/daily.ts](server/tasks/daily.ts) + [server/api/cron.post.ts](server/api/cron.post.ts) | 新增。一次跑完 检测→抓取→汇率 |
-| 定时器守卫 | [server/plugins/availability.ts](server/plugins/availability.ts) | CF 上自动跳过进程内定时器 |
+| 指标 | 数值 |
+| --- | --- |
+| 启动后内存 RSS | **86 MB** |
+| 20 并发 × 20 轮压测后 RSS | **261 MB** |
+| 压测后私有内存 | 271 MB |
+| CPU 累计（400 次请求） | 6.7 s |
+| `node:sqlite` 数据库体积 | **4 KB**（4 条记录） |
+| 依赖数量 | Nuxt + Vue，**无任何数据库驱动** |
 
-**KV 的异步特性处理**：现有业务是同步读写。KV 后端采用「内存快照 + 异步回写」——
-冷启动后**第一次请求**读到空（自动用种子价兜底），同时后台拉 KV，**第二次请求起**就是 KV 真值。
-对分钟级更新的报价站可接受。
+1核1G 机型：系统 ~250MB + 容器限额 400MB = **安全余量充足**。容器内存硬上限设为 **400M**，超了只会 GC 不会拖死整机。
 
-## 二、创建 KV 命名空间
-
-```powershell
-pnpm dlx wrangler login
-pnpm dlx wrangler kv namespace create DATA
-# 输出类似：
-#   [[kv_namespaces]]
-#   binding = "DATA"
-#   id = "a1b2c3d4e5f6..."
-```
-
-把 `id` 填进 `wrangler.toml`：
-
-```toml
-[[kv_namespaces]]
-binding = "DATA"
-id = "你的命名空间id"
-```
-
-## 三、让 KV 绑定生效
-
-Workers 环境下 Nitro 拿不到 `DATA` 绑定是**静默降级**（用内存），
-所以需要在 Worker 入口注入。Pages 项目设置 → **Settings → Functions →
-KV namespace bindings** 添加：变量名 `DATA`，选刚创建的命名空间。
-
-> Pages 的绑定在 Dashboard 配，`wrangler.toml` 里的 `[[kv_namespaces]]` 主要给 `wrangler pages deploy` 用。
-
-然后把绑定注入 Nitro，改 `server/plugins/storage.ts`（新增）：
-
-```ts
-import { installKVBackend } from '../utils/cloudflare-kv'
-
-export default defineNitroPlugin((nitro) => {
-  // nitro.runtime 里拿 Cloudflare 的 env.DATA
-  const kv = (globalThis as any).__env__?.DATA ?? (globalThis as any).process?.env?.DATA
-  if (kv && typeof kv.get === 'function') {
-    installKVBackend(kv)
-    console.log('[storage] Cloudflare KV backend installed')
-  }
-})
-```
-
-## 四、部署
-
-### 方式 A：Git 集成（推荐）
-
-Cloudflare Dashboard → Workers & Pages → Create → Pages → Connect to Git → `ice-a/vpsls`
-
-- Build command：`pnpm exec nuxi build --preset cloudflare_pages`
-- Output directory：`dist`
-- 环境变量：`NODE_VERSION=20`、`PNPM_VERSION=9`、`CRON_SECRET=<你自己定一个随机串>`
-- KV binding：`DATA` → 你的命名空间
-
-### 方式 B：CLI 直传
-
-```powershell
-pnpm build:cf
-pnpm dlx wrangler pages deploy dist --project-name=vpsls
-```
-
-## 五、每日任务
-
-Workers 无进程内定时器，三条路选一条：
-
-**① GitHub Actions（最省事，已在仓库 `.github/workflows/daily.yml` 配好）**
-
-```yaml
-name: daily
-on:
-  schedule: [{ cron: '0 20 * * *' }]   # UTC 20:00 = 北京 04:00
-  workflow_dispatch:
-jobs:
-  run:
-    runs-on: ubuntu-latest
-    steps:
-      - run: curl -fsS -X POST "$BASE/api/cron?key=$KEY"
-        env:
-          BASE: https://vpsls.pages.dev
-          KEY: ${{ secrets.CRON_SECRET }}
-```
-
-**② Cloudflare Cron Triggers**：`wrangler.toml` 已配 `0 4 * * *`，
-但需要 Worker 导出 `scheduled`。Pages 的 `_worker.js` 由 Nitro 生成不暴露这个钩子，
-所以要在 Pages 项目里另建一个 **Worker** 专门调接口。
-
-**③ 任意服务器 crontab**
+## 二、部署三步
 
 ```bash
-0 4 * * * curl -fsS -X POST "https://vpsls.pages.dev/api/cron?key=YOUR_SECRET"
+# 1. 拉代码
+git clone https://github.com/ice-a/vpsls.git
+cd vpsls
+
+# 2. 配置（可选，不改也能跑）
+cp .env.example .env
+#   编辑 .env：APP_PORT=3000、CRON_SECRET=你的随机串
+
+# 3. 构建并启动
+docker compose up -d --build
 ```
 
-## 六、验收清单
+访问 `http://服务器IP:3000`。
+
+首次构建约 3-5 分钟（要装依赖 + 构建 Nuxt）。之后更新：
 
 ```bash
-BASE=https://vpsls.pages.dev
-
-curl -s -o /dev/null -w "%{http_code}\n" $BASE/                       # 200
-curl -s $BASE/ | grep -c "按年付总价"                                  # ≥1
-curl -s "$BASE/api/offers?window=180" | head -c 120                   # 含 perYear
-curl -s -o /dev/null -w "%{http_code} %{redirect_url}\n" $BASE/go/justhost
-# 302 https://justhost.asia/?ref=387918
-curl -s -o /dev/null -w "%{http_code} %{redirect_url}\n" $BASE/go/hetzner
-# 302 https://www.hetzner.com/
-
-# 手动跑一次每日任务
-curl -s -X POST "$BASE/api/cron?key=YOUR_SECRET"
-# 期望：{"ok":true,"check":{"up":18,...},"refetch":{"ok":[...],"totalPlans":82},"rates":{...}}
-
-# 再访问一次，确认 KV 写入生效
-curl -s $BASE/api/status | head -c 200                                # lastRun 有 finishedAt
+git pull && docker compose up -d --build
 ```
 
-## 七、本地验证（不部署也能验）
+## 三、数据持久化
+
+- SQLite 数据库落在 Docker 卷 `vpsls-data` → 容器内 `/data/vpsls.db`
+- 重建容器、升级镜像**数据不丢**
+- 备份：`docker compose exec app cp /data/vpsls.db /data/backup-$(date +%F).db`
+- 导出到宿主机：`docker cp vpsls:/data/vpsls.db ./backup.db`
+
+表结构（单表）：
+
+```sql
+CREATE TABLE documents (
+  key        TEXT PRIMARY KEY,   -- state.json / rates.json / official/plans.json ...
+  data       TEXT NOT NULL,      -- 整份 JSON
+  updated_at TEXT NOT NULL
+);
+```
+
+查看内容：
 
 ```bash
-pnpm build            # node-server 产物，.output/server/index.mjs
-pnpm build:cf         # CF 产物，dist/_worker.js
-pnpm dlx wrangler pages dev dist    # 本地模拟 Workers，http://localhost:8788
+docker compose exec app node -e "
+const {DatabaseSync}=require('node:sqlite');
+const db=new DatabaseSync('/data/vpsls.db');
+console.log(db.prepare('SELECT key,updated_at FROM documents').all());
+"
 ```
 
-## 常见报错
+## 四、每日任务
 
-| 现象 | 原因 | 处理 |
-| --- | --- | --- |
-| 线上数据不持久（每次请求都像首次） | KV binding 没配上 | Dashboard 加 `DATA` 绑定，或看 Worker 日志有无 `KV backend installed` |
-| 首次访问数据为空 | KV 异步加载 | 正常。刷新一次即真值；想消除可加预热 |
-| `Module not found: node:fs` | 没开 node compat | `compatibility_flags=["nodejs_compat"]` |
-| `/api/cron` 返回 401 | 配了 `CRON_SECRET` 但没带 key | 请求加 `?key=xxx` 或 header `x-cron-key` |
-| 构建后 dist 为空 | 命令没带 preset | 用 `pnpm build:cf` |
+容器内**自带定时器**（进程存活即生效）：每天 **04:00（北京时间）** 自动跑检测 + 官方套餐抓取。
+
+如需外部兜底或手动触发：
+
+```bash
+curl -X POST "http://服务器IP:3000/api/cron?key=你的CRON_SECRET"
+```
+
+服务器 crontab 兜底（可选）：
+
+```bash
+0 4 * * * curl -fsS -X POST "http://127.0.0.1:3000/api/cron?key=你的CRON_SECRET"
+```
+
+## 五、验收清单
+
+```bash
+BASE=http://服务器IP:3000
+
+curl -s $BASE/api/storage
+# {"backend":"sqlite","path":"/data/vpsls.db","rows":4,"driver":"node:sqlite","node":"v22.x"}
+
+curl -s -X POST "$BASE/api/cron?key=你的密钥"
+# {"ok":true,"storage":{"backend":"sqlite","rows":4},"check":{"up":18,...},"errors":[]}
+
+curl -s $BASE/api/status          # lastRun 有 finishedAt
+curl -s "$BASE/api/offers?window=180" | head -c 120   # 含 perYear
+curl -s -o /dev/null -w "%{http_code}\n" $BASE/       # 200
+```
+
+## 六、常用运维
+
+```bash
+docker compose logs -f app          # 看日志
+docker compose stats                # 看实时资源占用
+docker compose restart app          # 重启
+docker compose down                 # 停止（数据卷保留）
+docker compose down -v              # 停止并删数据（慎用）
+```
+
+## 七、反向代理（可选）
+
+如果机器上有 Caddy/Nginx，转发到 `127.0.0.1:3000` 即可。Caddy 一行：
+
+```
+vps.example.com {
+    reverse_proxy 127.0.0.1:3000
+}
+```
+
+## 八、已知边界
+
+1. **Node 版本要求 ≥ 22.5**：`node:sqlite` 是内置模块，Dockerfile 用 `node:22-alpine` 已满足。自己跑源码需要 `node -v` ≥ 22.5。
+2. **单实例**：SQLite WAL 支持并发读、单写。单容器单实例完全够用；不要水平扩到多容器共用一个 db 文件。
+3. **首次请求**：SQLite 同步读取，**无异步空窗**（这点比之前的 Mongo 方案更干净）。
+4. **官方套餐抓取**：6 个源里 bandwagon/colocrossing/bytevirt/dedione/wapac/ovh，国外 VPS 访问这些站点可能较慢，单次抓取约 10-30 秒，超时 20 秒会跳过该源并回退种子价。
+
+## 九、如果还想再轻
+
+当前已经是「Nuxt SSR + 内置 SQLite + 无外部依赖」的最小可用组合。若要进一步压到 ~80MB 常驻：
+
+- 把 SSR 改成纯静态（`nitro.preset = 'static'`），API 用外部服务 → 失去服务端筛选/统计
+- 或者重写为 Hono + Preact（工作量大，收益是内存从 261MB 降到 ~90MB）
+
+**当前 400M 限额下 1核1G 完全跑得动，不建议为此重写。**

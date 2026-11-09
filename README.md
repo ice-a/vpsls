@@ -1,14 +1,22 @@
 # VPS 报价单（vpsls 同款 · 前后端不分离）
 
-仿 [vpsls.com](https://vpsls.com/) 模式的 VPS 优惠聚合站：**Nuxt 4 SSR 单体**（页面与 API 同进程、同端口，无前后端分离）、**服务商连通性每日 04:00 自动检测**、**全站推广链接统一出口替换**、UI 全新设计（机房报价单 / 工业仪表盘风）。
+仿 [vpsls.com](https://vpsls.com/) 模式的 VPS 优惠聚合站：**Nuxt 4 SSR 单体**（页面与 API 同进程、同端口）、**服务商连通性每日 04:00 自动检测**、**全站推广链接统一出口替换**、UI 全新设计（机房报价单 / 工业仪表盘风）。
+
+**持久化**：Node 内置 `node:sqlite`（零依赖，无外部数据库）。
+**部署**：Docker Compose 一条命令，适配 1核1G。详见 [DEPLOY.md](DEPLOY.md)。
 
 ## 快速开始
 
 ```bash
-pnpm install          # 安装依赖（node ≥ 20，pnpm ≥ 10）
-pnpm dev              # 开发：http://localhost:3000
-pnpm build && pnpm start   # 生产：.output/server/index.mjs
-# 换端口：PORT=3210 node .output/server/index.mjs
+# Docker（推荐，1核1G 可跑）
+docker compose up -d --build     # 访问 http://IP:3000
+
+# 本地开发（需 Node ≥ 22.5，node:sqlite 内置）
+pnpm install
+pnpm dev                          # http://localhost:3000
+
+# 本地生产
+pnpm build && pnpm start
 ```
 
 页面：`/` 首页（榜单+推荐+状态）、`/deals` 实时筛选器、`/guide` 测速选购方法、`/providers` 服务商目录、`/stats` 访问统计。

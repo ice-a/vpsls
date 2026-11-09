@@ -1,16 +1,13 @@
-import { flushMongo, mongoReady } from '../utils/mongodb'
+import { sqliteStats } from '../utils/sqlite'
 
-/**
- * 存储健康检查：GET /api/storage
- * 给线上验收用 —— 一眼看出当前跑在 Mongo 还是本地文件，内存里有哪些 key。
- */
+/** 存储健康检查：GET /api/storage —— 线上排查第一站 */
 export default defineEventHandler(() => {
-  const usingMongo = !!process.env.MONGODB_URI
+  const s = sqliteStats()
   return {
-    backend: usingMongo ? 'mongodb' : 'filesystem',
-    db: process.env.MONGODB_DB || 'vpsls',
-    mongoReady: mongoReady(),
-    // 不返回连接串，只返回是否存在
-    hasUri: usingMongo
+    backend: 'sqlite',
+    path: s.path,
+    rows: s.rows,
+    driver: 'node:sqlite',
+    node: process.version
   }
 })
