@@ -1,22 +1,17 @@
-import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs'
-import { join } from 'node:path'
 import type { CheckRun, Offer, Provider, ProviderRow } from '#shared/types'
 import { hasAffProvider } from '#shared/aff'
 import { SEED_PROVIDERS } from '../data/providers'
 import { buildOffers } from '../data/offers'
-import { getOfficialPlans, getOfficialState } from '../scrape/official'
+import { getOfficialState } from '../scrape/official'
 import { perMonthOf } from '../scrape/parsers'
-
-/** 年付总价：月付×12 / 季付×4 / 半年付×2 / 年付=标价（不走 perMonth×12 防舍入漂移） */
-const YEAR_DIV: Record<string, number> = { monthly: 12, quarterly: 4, semiannual: 2, yearly: 1 }
-export const perYearOf = (price: number, cycle: string) =>
-  Math.round(price * (YEAR_DIV[cycle] ?? 12) * 100) / 100
+import { storageRead, storageWrite } from './storage'
 
 /**
  * 轻量 JSON 存储（单体站够用）：
  *  - 目录数据（厂商/套餐）来自种子文件，代码即数据；
- *  - 运行状态（可用性检测结果、最近一次检测汇总）持久化到 .data/state.json，
- *    进程重启不丢。挂卷部署时把 .data 目录持久化即可。
+ *  - 运行状态（可用性检测结果、最近一次检测汇总）持久化到 state.json。
+ *
+ * 存储后端由 storage.ts 决定：Node → .data/ 文件；Workers → KV。
  */
 
 export interface PersistedState {
@@ -25,17 +20,16 @@ export interface PersistedState {
 }
 
 const EMPTY: PersistedState = { providerStatus: {}, lastRun: null }
-
-const dataDir = join(process.cwd(), '.data')
-const stateFile = join(dataDir, 'state.json')
+const STATE_KEY = 'state.json'
 
 let cache: PersistedState | null = null
 
 function load(): PersistedState {
   if (cache) return cache
-  if (existsSync(stateFile)) {
+  const raw = storageRead(STATE_KEY)
+  if (raw) {
     try {
-      cache = { ...EMPTY, ...JSON.parse(readFileSync(stateFile, 'utf-8')) }
+      cache = { ...EMPTY, ...JSON.parse(raw) }
     } catch {
       cache = structuredClone(EMPTY)
     }
@@ -46,8 +40,8 @@ function load(): PersistedState {
 }
 
 function persist() {
-  mkdirSync(dataDir, { recursive: true })
-  writeFileSync(stateFile, JSON.stringify(cache, null, 2), 'utf-8')
+  if (!cache) return
+  storageWrite(STATE_KEY, JSON.stringify(cache, null, 2))
 }
 
 /** 种子目录 + 状态合并后的厂商列表 */
@@ -59,6 +53,11 @@ export function getProviders(): Provider[] {
 export function getProvider(slug: string): Provider | undefined {
   return getProviders().find(p => p.slug === slug)
 }
+
+/** 年付总价：月付×12 / 季付×4 / 半年付×2 / 年付=标价（不走 perMonth×12 防舍入漂移） */
+const YEAR_DIV: Record<string, number> = { monthly: 12, quarterly: 4, semiannual: 2, yearly: 1 }
+export const perYearOf = (price: number, cycle: string) =>
+  Math.round(price * (YEAR_DIV[cycle] ?? 12) * 100) / 100
 
 /** 套餐：官方抓取成功的厂商整组替换种子，其余回退种子（source 标记数据口径） */
 export function getOffers(): Offer[] {

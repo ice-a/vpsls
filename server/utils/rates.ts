@@ -1,10 +1,9 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { storageRead, storageWrite } from './storage'
 
 /**
  * 实时汇率（USD → CNY）
  *  - 双源：jsdelivr currency-api（主）→ open.er-api.com（备）→ 回退常量
- *  - 缓存 .data/rates.json，6 小时内直接用缓存；过期则后台刷新（本次请求先用旧值，不阻塞页面）
+ *  - 缓存 rates.json，6 小时内直接用缓存；过期则后台刷新（本次请求先用旧值，不阻塞页面）
  *  - 对外接口 GET /api/rates
  */
 
@@ -17,18 +16,17 @@ interface RatesState {
 
 const TTL_MS = 6 * 3600 * 1000
 const FALLBACK: RatesState = { usdCny: 6.68, updatedAt: '1970-01-01T00:00:00.000Z', source: 'fallback', fallback: true }
-
-const dataDir = join(process.cwd(), '.data')
-const file = join(dataDir, 'rates.json')
+const KEY = 'rates.json'
 
 let cache: RatesState | null = null
 let refreshing: Promise<RatesState> | null = null
 
 function loadCache(): RatesState {
   if (cache) return cache
-  if (existsSync(file)) {
+  const raw = storageRead(KEY)
+  if (raw) {
     try {
-      cache = { ...FALLBACK, ...JSON.parse(readFileSync(file, 'utf-8')) }
+      cache = { ...FALLBACK, ...JSON.parse(raw) }
     } catch {
       cache = { ...FALLBACK }
     }
@@ -40,8 +38,7 @@ function loadCache(): RatesState {
 
 function saveCache(s: RatesState) {
   cache = s
-  mkdirSync(dataDir, { recursive: true })
-  writeFileSync(file, JSON.stringify(s, null, 2), 'utf-8')
+  storageWrite(KEY, JSON.stringify(s, null, 2))
 }
 
 async function fetchFrom(url: string, pick: (j: any) => number | undefined): Promise<number | undefined> {

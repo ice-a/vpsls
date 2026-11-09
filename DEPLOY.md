@@ -1,117 +1,93 @@
-# 部署到 Cloudflare Pages（不构建 app，纯 Web）
+# Cloudflare Pages 部署（完整功能 · KV 版）
 
-本项目是 Nuxt 4 SSR 单体（前后端不分离）。Nitro 官方 preset `cloudflare_pages` 已在本机跑通：产物 `dist/`，入口 `dist/_worker.js`，总体积约 517 kB。
+代码已改造为**双后端**：本地/VPS 走文件，Cloudflare 走 KV。同一份代码两边都能跑。
 
-## 0. 关键前提：存储层
+## 一、存储层改造说明（已完成）
 
-线上唯一**会失败**的点是数据持久化。当前实现用 Node `fs` 写 `.data/`：
-
-| 文件 | 用途 | CF 上的后果 |
+| 模块 | 文件 | 改动 |
 | --- | --- | --- |
-| `.data/state.json` | 服务商连通性检测结果 | 无法落盘 → 每次请求都当首次检测 |
-| `.data/analytics.json` | 页面 PV / 点击 / 搜索条件 | 统计数据全部丢失 |
-| `.data/rates.json` | USD→CNY 汇率缓存 | 每次回源查汇率（慢但能跑） |
-| `.data/official/plans.json` | 官方套餐抓取结果 | 官方源数据丢失，只剩种子价 |
+| 存储抽象 | [server/utils/storage.ts](server/utils/storage.ts) | 新增。`storageRead/storageWrite` 统一接口，Node 落地 `fs` |
+| KV 后端 | [server/utils/cloudflare-kv.ts](server/utils/cloudflare-kv.ts) | 新增。内存快照 + 异步回写 KV |
+| 检测状态 | [server/utils/db.ts](server/utils/db.ts) | `fs` → `storageRead/Write`，键 `state.json` |
+| 访问统计 | [server/utils/analytics.ts](server/utils/analytics.ts) | 同上，键 `analytics.json` |
+| 汇率 | [server/utils/rates.ts](server/utils/rates.ts) | 同上，键 `rates.json` |
+| 抓取缓存 | [server/scrape/fetch.ts](server/scrape/fetch.ts) | 同上，键 `official/html-cache.json` |
+| 官方套餐 | [server/scrape/official.ts](server/scrape/official.ts) | 同上，键 `official/plans.json` |
+| 每日任务 | [server/tasks/daily.ts](server/tasks/daily.ts) + [server/api/cron.post.ts](server/api/cron.post.ts) | 新增。一次跑完 检测→抓取→汇率 |
+| 定时器守卫 | [server/plugins/availability.ts](server/plugins/availability.ts) | CF 上自动跳过进程内定时器 |
 
-另有 `server/plugins/availability.ts` 注册的 `setTimeout` 定时器，在 Workers 上会被冻结 —— 每日检测必须改用 **Cron Triggers**（已在 `wrangler.toml` 配好 `0 4 * * *`）。
+**KV 的异步特性处理**：现有业务是同步读写。KV 后端采用「内存快照 + 异步回写」——
+冷启动后**第一次请求**读到空（自动用种子价兜底），同时后台拉 KV，**第二次请求起**就是 KV 真值。
+对分钟级更新的报价站可接受。
 
-**两条路线，选一条：**
+## 二、创建 KV 命名空间
 
-- **路线 A（不改代码，先上线看效果）**：只读模式。种子价 + 汇率实时查询可用，检测/统计/官方套餐降级为空。适合先验证 UI 和流量。
-- **路线 B（要完整功能）**：把 `db.ts` / `analytics.ts` / `rates.ts` / `scrape/fetch.ts` 的 `fs` 换成 **Cloudflare KV**（简单键值够用）或 **D1**（需要 SQL 时）。改动集中在 4 个文件，接口签名不变。
-
-> 路线 B 我可以直接改，说一声即可。
-
-## 1. 推送到 GitHub
-
-```bash
-cd C:\Users\lee\Desktop\dev\ai\vpsls
-
-git init -b main
-git add .
-git commit -m "feat: VPS 报价单 — 年付口径 + 官方套餐源 + CF Pages 部署"
-
-# 方式一：仓库已存在
-git remote add origin https://github.com/ice-a/vpsls.git
-git push -u origin main
-
-# 方式二：用 gh CLI 一次建仓并推送
-gh auth login
-gh repo create ice-a/vpsls --public --source=. --push
+```powershell
+pnpm dlx wrangler login
+pnpm dlx wrangler kv namespace create DATA
+# 输出类似：
+#   [[kv_namespaces]]
+#   binding = "DATA"
+#   id = "a1b2c3d4e5f6..."
 ```
 
-首次 `push` 需要 GitHub 凭据：HTTPS 用 **Personal Access Token**（Settings → Developer settings → Tokens，勾 `repo`），或配好 SSH key 后改用 `git@github.com:ice-a/vpsls.git`。
+把 `id` 填进 `wrangler.toml`：
 
-`.gitignore` 已排除 `node_modules/ .nuxt/ .output/ .data/ .probe/ .wrangler/ dist/`。
-
-## 2. 在 Cloudflare 建 Pages 项目（Git 集成，推荐）
-
-1. Cloudflare Dashboard → **Workers & Pages** → **Create** → **Pages** → **Connect to Git**
-2. 授权 GitHub，选 `ice-a/vpsls` 仓库，分支 `main`
-3. 构建配置：
-   - Framework preset：**Nuxt**（没有就选 None）
-   - Build command：`pnpm exec nuxi build --preset cloudflare_pages`
-   - Build output directory：`dist`
-   - 环境变量：`NODE_VERSION=20`、`PNPM_VERSION=9`
-4. **Save and Deploy**。首次构建约 2–4 分钟。
-
-之后每次 `git push` 自动重新部署。
-
-## 3. 或者用 CLI 直传（不上 Git 集成）
-
-```bash
-pnpm install
-pnpm build:cf                      # 产出 dist/
-pnpm dlx wrangler login            # 浏览器授权
-pnpm dlx wrangler pages deploy dist --project-name=vpsls
+```toml
+[[kv_namespaces]]
+binding = "DATA"
+id = "你的命名空间id"
 ```
 
-`wrangler.toml` 已写好 `name / compatibility_date / compatibility_flags=["nodejs_compat"] / pages_build_output_dir` 和 cron。
+## 三、让 KV 绑定生效
 
-## 4. 绑自定义域名
+Workers 环境下 Nitro 拿不到 `DATA` 绑定是**静默降级**（用内存），
+所以需要在 Worker 入口注入。Pages 项目设置 → **Settings → Functions →
+KV namespace bindings** 添加：变量名 `DATA`，选刚创建的命名空间。
 
-Pages 项目 → **Custom domains** → **Set up a custom domain** → 填你的域名。
-域名在同一 Cloudflare 账号下会自动建 CNAME；在别处则按提示加 CNAME 指向 `<project>.pages.dev`。
+> Pages 的绑定在 Dashboard 配，`wrangler.toml` 里的 `[[kv_namespaces]]` 主要给 `wrangler pages deploy` 用。
 
-## 5. 验收清单（部署后逐条 curl）
-
-```bash
-BASE=https://vpsls.pages.dev
-
-curl -s -o /dev/null -w "%{http_code}\n" $BASE/                       # 期望 200
-curl -s $BASE/ | grep -c "按年付总价"                                  # 期望 ≥1
-curl -s "$BASE/api/offers?window=180" | head -c 200                   # 期望含 "perYear"
-curl -s $BASE/guide | grep -c "一键测速"                               # 期望 ≥1
-curl -s -o /dev/null -w "%{http_code} %{redirect_url}\n" $BASE/go/justhost
-# 期望：302 https://justhost.asia/?ref=387918
-curl -s -o /dev/null -w "%{http_code} %{redirect_url}\n" $BASE/go/hetzner
-# 期望：302 https://www.hetzner.com/（无 aff 就是裸链）
-```
-
-## 6. 每日任务（CF 上）
-
-`wrangler.toml` 的 `[triggers] crons = ["0 4 * * *"]` 会在每天 04:00 UTC 触发 Worker。当前代码里没有 cron handler，**需要补一个**：
+然后把绑定注入 Nitro，改 `server/plugins/storage.ts`（新增）：
 
 ```ts
-// server/plugins/cf-cron.ts
+import { installKVBackend } from '../utils/cloudflare-kv'
+
 export default defineNitroPlugin((nitro) => {
-  // Cloudflare 环境下由 scheduled handler 调用，见下
+  // nitro.runtime 里拿 Cloudflare 的 env.DATA
+  const kv = (globalThis as any).__env__?.DATA ?? (globalThis as any).process?.env?.DATA
+  if (kv && typeof kv.get === 'function') {
+    installKVBackend(kv)
+    console.log('[storage] Cloudflare KV backend installed')
+  }
 })
 ```
 
-更直接的做法是外部 cron 打接口（不改代码也能跑）：
+## 四、部署
 
-```bash
-# 每天 04:00 调用，结果幂等
-curl -X POST https://vpsls.pages.dev/api/check
-curl -X POST "https://vpsls.pages.dev/api/refetch?force=1"
+### 方式 A：Git 集成（推荐）
+
+Cloudflare Dashboard → Workers & Pages → Create → Pages → Connect to Git → `ice-a/vpsls`
+
+- Build command：`pnpm exec nuxi build --preset cloudflare_pages`
+- Output directory：`dist`
+- 环境变量：`NODE_VERSION=20`、`PNPM_VERSION=9`、`CRON_SECRET=<你自己定一个随机串>`
+- KV binding：`DATA` → 你的命名空间
+
+### 方式 B：CLI 直传
+
+```powershell
+pnpm build:cf
+pnpm dlx wrangler pages deploy dist --project-name=vpsls
 ```
 
-用 **GitHub Actions** 免费跑：
+## 五、每日任务
+
+Workers 无进程内定时器，三条路选一条：
+
+**① GitHub Actions（最省事，已在仓库 `.github/workflows/daily.yml` 配好）**
 
 ```yaml
-# .github/workflows/daily.yml
-name: daily-check
+name: daily
 on:
   schedule: [{ cron: '0 20 * * *' }]   # UTC 20:00 = 北京 04:00
   workflow_dispatch:
@@ -119,23 +95,57 @@ jobs:
   run:
     runs-on: ubuntu-latest
     steps:
-      - run: curl -fsS -X POST https://vpsls.pages.dev/api/check
-      - run: curl -fsS -X POST "https://vpsls.pages.dev/api/refetch?force=1"
+      - run: curl -fsS -X POST "$BASE/api/cron?key=$KEY"
+        env:
+          BASE: https://vpsls.pages.dev
+          KEY: ${{ secrets.CRON_SECRET }}
 ```
 
-## 7. 本地验证 CF 产物
+**② Cloudflare Cron Triggers**：`wrangler.toml` 已配 `0 4 * * *`，
+但需要 Worker 导出 `scheduled`。Pages 的 `_worker.js` 由 Nitro 生成不暴露这个钩子，
+所以要在 Pages 项目里另建一个 **Worker** 专门调接口。
+
+**③ 任意服务器 crontab**
 
 ```bash
-pnpm build:cf
-pnpm dlx wrangler pages dev dist      # 起在 http://localhost:8788
+0 4 * * * curl -fsS -X POST "https://vpsls.pages.dev/api/cron?key=YOUR_SECRET"
+```
+
+## 六、验收清单
+
+```bash
+BASE=https://vpsls.pages.dev
+
+curl -s -o /dev/null -w "%{http_code}\n" $BASE/                       # 200
+curl -s $BASE/ | grep -c "按年付总价"                                  # ≥1
+curl -s "$BASE/api/offers?window=180" | head -c 120                   # 含 perYear
+curl -s -o /dev/null -w "%{http_code} %{redirect_url}\n" $BASE/go/justhost
+# 302 https://justhost.asia/?ref=387918
+curl -s -o /dev/null -w "%{http_code} %{redirect_url}\n" $BASE/go/hetzner
+# 302 https://www.hetzner.com/
+
+# 手动跑一次每日任务
+curl -s -X POST "$BASE/api/cron?key=YOUR_SECRET"
+# 期望：{"ok":true,"check":{"up":18,...},"refetch":{"ok":[...],"totalPlans":82},"rates":{...}}
+
+# 再访问一次，确认 KV 写入生效
+curl -s $BASE/api/status | head -c 200                                # lastRun 有 finishedAt
+```
+
+## 七、本地验证（不部署也能验）
+
+```bash
+pnpm build            # node-server 产物，.output/server/index.mjs
+pnpm build:cf         # CF 产物，dist/_worker.js
+pnpm dlx wrangler pages dev dist    # 本地模拟 Workers，http://localhost:8788
 ```
 
 ## 常见报错
 
 | 现象 | 原因 | 处理 |
 | --- | --- | --- |
-| 构建 `Module not found: node:fs` | 没开 node compat | 确认 `compatibility_flags=["nodejs_compat"]` 在 `wrangler.toml` 且 Pages 项目设置里 |
-| 线上 API 500 / 空数据 | `fs` 写盘失败 | 走路线 B 换 KV/D1，或接受只读降级 |
-| `dist` 为空 | build command 没带 `--preset cloudflare_pages` | 用上面给出的完整命令 |
-| 首次构建 pnpm 版本不符 | CF 默认 pnpm 5 | 设 `PNPM_VERSION=9` |
-| 定时任务不执行 | Workers 无进程内定时器 | 用 cron triggers 或 GH Actions 打接口 |
+| 线上数据不持久（每次请求都像首次） | KV binding 没配上 | Dashboard 加 `DATA` 绑定，或看 Worker 日志有无 `KV backend installed` |
+| 首次访问数据为空 | KV 异步加载 | 正常。刷新一次即真值；想消除可加预热 |
+| `Module not found: node:fs` | 没开 node compat | `compatibility_flags=["nodejs_compat"]` |
+| `/api/cron` 返回 401 | 配了 `CRON_SECRET` 但没带 key | 请求加 `?key=xxx` 或 header `x-cron-key` |
+| 构建后 dist 为空 | 命令没带 preset | 用 `pnpm build:cf` |

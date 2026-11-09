@@ -1,9 +1,9 @@
-import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs'
-import { join } from 'node:path'
+import { storageRead, storageWrite } from '../utils/storage'
 
 /**
- * 官方源抓取基建：UA + 超时 + 24h 本地缓存。
- * 缓存与解析结果都在 .data/official/ 下，部署挂持久卷即可跨重启。
+ * 官方源抓取基建：UA + 超时 + 24h 缓存。
+ * 缓存键 official/html-cache.json 与解析结果 official/plans.json：
+ * Node → .data/official/*.json；Workers → KV。
  */
 
 const UA =
@@ -11,8 +11,7 @@ const UA =
 const TIMEOUT_MS = 20000
 const CACHE_TTL = 24 * 3600 * 1000
 
-const dir = join(process.cwd(), '.data', 'official')
-const cacheFile = join(dir, 'html-cache.json')
+const CACHE_KEY = 'official/html-cache.json'
 
 interface CacheShape {
   [url: string]: { at: number; status: number; body: string }
@@ -22,9 +21,10 @@ let cache: CacheShape | null = null
 
 function loadCache(): CacheShape {
   if (cache) return cache
-  if (existsSync(cacheFile)) {
+  const raw = storageRead(CACHE_KEY)
+  if (raw) {
     try {
-      cache = JSON.parse(readFileSync(cacheFile, 'utf-8'))
+      cache = JSON.parse(raw)
     } catch {
       cache = {}
     }
@@ -35,8 +35,9 @@ function loadCache(): CacheShape {
 }
 
 function persistCache() {
-  mkdirSync(dir, { recursive: true })
-  writeFileSync(cacheFile, JSON.stringify(cache), 'utf-8')
+  if (!cache) return
+  // HTML 缓存体积大（≈1.8MB），KV 单值上限 25MB 够用；超限时截断到近期条目
+  storageWrite(CACHE_KEY, JSON.stringify(cache))
 }
 
 /** 抓页面：命中 24h 缓存直接用；force=true 强制重抓 */

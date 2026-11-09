@@ -1,11 +1,10 @@
-import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs'
-import { join } from 'node:path'
+import { storageRead, storageWrite } from './storage'
 
 /**
  * 访问统计（每日）：页面打开次数 / 出口点击（按产品） / 搜索条件。
- * 落盘 .data/analytics.json，与状态文件同一目录、同一部署口径（挂持久卷）。
- * 量级说明：单文件 JSON 每事件落一次，日均几千 PV 内无压力；
- * 上量后把 record* 换成 SQLite/ClickHouse 即可，接口不用动。
+ * 落 state 同级的 analytics.json。Node → 文件；Workers → KV。
+ * 量级说明：整份 JSON 读写，日均几千 PV 内无压力；
+ * 上量后把 record* 换成 D1/ClickHouse 即可，接口不用动。
  */
 
 interface DayBucket { [key: string]: number }
@@ -21,15 +20,15 @@ export interface AnalyticsState {
 }
 
 const EMPTY: AnalyticsState = { pages: {}, clicks: {}, searches: {} }
-const dataDir = join(process.cwd(), '.data')
-const file = join(dataDir, 'analytics.json')
+const KEY = 'analytics.json'
 let cache: AnalyticsState | null = null
 
 function load(): AnalyticsState {
   if (cache) return cache
-  if (existsSync(file)) {
+  const raw = storageRead(KEY)
+  if (raw) {
     try {
-      cache = { ...EMPTY, ...JSON.parse(readFileSync(file, 'utf-8')) }
+      cache = { ...EMPTY, ...JSON.parse(raw) }
     } catch {
       cache = structuredClone(EMPTY)
     }
@@ -40,8 +39,8 @@ function load(): AnalyticsState {
 }
 
 function persist() {
-  mkdirSync(dataDir, { recursive: true })
-  writeFileSync(file, JSON.stringify(cache, null, 2), 'utf-8')
+  if (!cache) return
+  storageWrite(KEY, JSON.stringify(cache))
 }
 
 /** 本地时区日期键 YYYY-MM-DD（统计按自然日切） */

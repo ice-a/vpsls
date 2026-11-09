@@ -1,13 +1,13 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { storageRead, storageWrite } from '../utils/storage'
 import { fetchPage } from './fetch'
 import { parseOvh, parseWapac, parseWhmcsNew, parseWhmcsOld, type ScrapedPlan } from './parsers'
 
 /**
- * 官方源调度：抓取 → 按厂商选解析器 → 落 .data/official/plans.json。
+ * 官方源调度：抓取 → 按厂商选解析器 → 落 official/plans.json。
  *  - 成功的厂商：套餐目录整体换成官方（source=official）
- *  - 失败/反爬/客户端渲染的厂商（contabo/hetzner/vultr/...）：无 plans 条目 → 回退种子（source=seed）
- *  - HTML 24h 缓存在 fetch.ts；plans.json 每次 refetch 全量重写，原子语义（整文件替换）
+ *  - 失败/反爬/客户端渲染的厂商：无 plans 条目 → 回退种子（source=seed）
+ *  - HTML 24h 缓存在 fetch.ts；plans.json 每次 refetch 全量重写
+ *  - Node → .data/official/；Workers → KV
  */
 
 export interface SourceCfg {
@@ -17,7 +17,7 @@ export interface SourceCfg {
   defaultRegions: string[]
 }
 
-/** 已解剖验证过的 6 个官方源；其余见 .probe/PLAN.md 的落选原因 */
+/** 已解剖验证过的 6 个官方源 */
 export const OFFICIAL_SOURCES: SourceCfg[] = [
   { slug: 'bandwagon', url: 'https://bwh81.net/cart.php?gid=1', kind: 'whmcs-old', defaultRegions: ['US-WEST'] },
   { slug: 'colocrossing', url: 'https://cloud.colocrossing.com/cart.php?gid=1', kind: 'whmcs-new', defaultRegions: ['US-EAST'] },
@@ -27,8 +27,7 @@ export const OFFICIAL_SOURCES: SourceCfg[] = [
   { slug: 'ovhcloud', url: 'https://www.ovhcloud.com/en/vps/', kind: 'ovh', defaultRegions: ['EU'] }
 ]
 
-const dir = join(process.cwd(), '.data', 'official')
-const plansFile = join(dir, 'plans.json')
+const PLANS_KEY = 'official/plans.json'
 
 export interface PlansState {
   updatedAt: string
@@ -40,9 +39,10 @@ let cache: PlansState | null = null
 
 function load(): PlansState {
   if (cache) return cache
-  if (existsSync(plansFile)) {
+  const raw = storageRead(PLANS_KEY)
+  if (raw) {
     try {
-      cache = JSON.parse(readFileSync(plansFile, 'utf-8'))
+      cache = JSON.parse(raw)
     } catch {
       cache = { updatedAt: '', bySlug: {} }
     }
@@ -53,8 +53,8 @@ function load(): PlansState {
 }
 
 function persist() {
-  mkdirSync(dir, { recursive: true })
-  writeFileSync(plansFile, JSON.stringify(cache), 'utf-8')
+  if (!cache) return
+  storageWrite(PLANS_KEY, JSON.stringify(cache))
 }
 
 function parseBy(kind: SourceCfg['kind'], html: string, cfg: SourceCfg): ScrapedPlan[] {
