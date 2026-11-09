@@ -1,15 +1,14 @@
 # Cloudflare Pages 配置
-# 构建：pnpm exec nuxi build --preset cloudflare_pages -> dist/
+# 构建命令：pnpm exec nuxi build --preset cloudflare_pages -> 产物目录 dist/
 #
-# 注意：Pages 项目的 wrangler.toml 只支持 page 相关字段。
-# 以下在 Pages 上会报 "Configuration file for Pages projects does not support xxx"：
-#   - [triggers] / crons   → Cron 只属于 Workers，Pages 需另建 Worker 或外部调度
-#   - [observability]      → Workers 专属
-# 每日任务见 .github/workflows/daily.yml（打 POST /api/cron）
+# 重要：本项目部署目标是 Pages，不是 Workers。
+# Pages 项目的配置文件只接受下列字段；写入 Workers 专属字段会直接导致构建失败：
+#   crons / triggers、observability、durable_objects、queues、r2_buckets 等
+# 每日定时任务不在这里配置，见 .github/workflows/daily.yml（定时调用 /api/cron 接口）
+#
+# KV 绑定在 Cloudflare Dashboard 配置：
+#   Pages 项目 -> Settings -> Functions -> KV namespace bindings -> 变量名 DATA
 name = "vpsls"
 compatibility_date = "2025-07-15"
 compatibility_flags = ["nodejs_compat"]
 pages_build_output_dir = "dist"
-
-# KV 绑定：在 Pages Dashboard → Settings → Functions → KV namespace bindings 配
-# （本项目用 Dashboard 绑定，此处不写 [[kv_namespaces]]，避免 CLI 与面板冲突）
