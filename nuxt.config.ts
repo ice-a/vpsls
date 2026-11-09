@@ -39,5 +39,24 @@ export default defineNuxtConfig({
     '/api/**': { cors: true, headers: { 'cache-control': 'no-store' } }
   },
 
+  /**
+   * mongodb 驱动的可选能力（AWS IAM 认证、zstd 压缩、Kerberos 等）用的是
+   * 动态 require，打包器解析不到会直接构建失败。标记为 external：
+   * 运行时若真用到才需要装，我们用标准 SCRAM 认证，永远不触发。
+   */
+  nitro: {
+    rollupConfig: {
+      external: [
+        '@aws-sdk/credential-providers',
+        '@mongodb-js/zstd',
+        'gcp-metadata',
+        'kerberos',
+        'mongodb-client-encryption',
+        'snappy',
+        'socks'
+      ]
+    }
+  },
+
   typescript: { strict: true }
 })

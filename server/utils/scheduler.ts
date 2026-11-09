@@ -1,4 +1,3 @@
-import type { CheckRun, Provider } from '#shared/types'
 import { getProviders, getState, setLastRun, setProviderStatus } from './db'
 import { officialStale, refetchOfficial } from '../scrape/official'
 
@@ -12,8 +11,7 @@ import { officialStale, refetchOfficial } from '../scrape/official'
  *  - 启动时若距上次检测超过 20 小时，静默补跑一轮。
  *  - 手动触发：curl -X POST http://localhost:3000/api/check
  *
- * 多实例部署建议只留一个实例跑 startDailyChecks，或换成外部 cron 调
- * POST /api/check（检测结果幂等，多跑只是浪费请求）。
+ * Cloudflare Workers 无进程内定时器 → 由 /api/cron 触发（见 tasks/daily.ts）。
  */
 
 const CHECK_HOUR = 4 // 本地时间凌晨 4 点
@@ -41,7 +39,7 @@ async function probe(url: string): Promise<boolean> {
 }
 
 /** 跑一轮全量检测并落盘，返回汇总 */
-export async function runCheck(): Promise<CheckRun> {
+export async function runCheck(): Promise<import('#shared/types').CheckRun> {
   const startedAt = new Date()
   const providers = getProviders()
   const queue = [...providers]
@@ -60,7 +58,7 @@ export async function runCheck(): Promise<CheckRun> {
   const now = new Date().toISOString()
   for (const p of providers) {
     const ok = results.get(p.slug) ?? null
-    let availability: Provider['availability']
+    let availability: typeof p.availability
     let failStreak: number
 
     if (ok === null) {
@@ -80,7 +78,7 @@ export async function runCheck(): Promise<CheckRun> {
   }
 
   const finishedAt = new Date()
-  const run: CheckRun = {
+  const run = {
     startedAt: startedAt.toISOString(),
     finishedAt: finishedAt.toISOString(),
     total: providers.length,
@@ -106,14 +104,13 @@ let running = false
 
 function loop() {
   timer = setTimeout(async () => {
-    if (!running) return // startDailyChecks 已被停止
+    if (!running) return
     try {
       const run = await runCheck()
       console.log(`[check] daily run: up=${run.up} down=${run.down} total=${run.total} (${run.durationMs}ms)`)
     } catch (err) {
       console.error('[check] daily run failed:', err)
     }
-    // 顺带刷新官方套餐源（与检测同频：每日一轮）
     refetchOfficial()
       .then(s => console.log(`[scrape] daily refetch: ok=${s.ok.join(',') || '-'} fail=${s.fail.join(',') || '-'} plans=${s.totalPlans}`))
       .catch(err => console.error('[scrape] daily refetch failed:', err))

@@ -1,17 +1,28 @@
-import { installKVBackend } from '../utils/cloudflare-kv'
+import { beginRemoteTransition, setStorageBackend } from '../utils/storage'
 
 /**
- * Cloudflare 运行时挂载 KV 后端。
+ * 启动挂载持久化后端（按优先级）：
+ *   1. MONGODB_URI 存在 → MongoDB（Atlas 等）
+ *   2. 否则 → Node 文件系统（.data/）
  *
- * Workers 里 Nitro 把环境变量/绑定放在 event.context.cloudflare.env 或全局 __env__ 上。
- * 拿不到绑定时静默降级为内存后端（storage.ts 默认是 fs，Workers 上 fs 会抛，所以这里也兜底）。
+ * 关键顺序问题：Nitro 插件执行前，其他插件（availability）可能已经开始写数据。
+ * 因此设置 MONGODB_URI 时，先把存储切到「内存缓冲」（绝不落盘），
+ * Mongo 就绪后再把缓冲回放到 Mongo。否则 Workers 上会写只读磁盘直接报错。
  */
-export default defineNitroPlugin(() => {
-  const g = globalThis as any
-  const kv = g.__env__?.DATA ?? g.process?.env?.DATA ?? g.caches?.DATA
+export default defineNitroPlugin(async () => {
+  if (!process.env.MONGODB_URI) {
+    console.log('[storage] MONGODB_URI 未设置，使用本地文件后端 (.data/)')
+    return
+  }
 
-  if (kv && typeof kv.get === 'function' && typeof kv.put === 'function') {
-    installKVBackend(kv)
-    console.log('[storage] Cloudflare KV backend installed')
+  // 先把可能抢先发生的写入兜住，不落磁盘
+  beginRemoteTransition()
+
+  const { installMongoBackend } = await import('../utils/mongodb')
+  const ok = await installMongoBackend()
+  if (!ok) {
+    console.error('[storage] MongoDB 初始化失败，回退本地文件后端')
+    const { fsBackend } = await import('../utils/storage')
+    setStorageBackend(fsBackend)
   }
 })

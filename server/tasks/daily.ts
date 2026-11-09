@@ -1,32 +1,22 @@
-/**
- * Cloudflare Workers 入口（scheduled cron handler）
- *
- * Cloudflare Pages 的 _worker.js 由 Nitro 生成，直接改写不现实。
- * 这里用「外部 cron 打接口」的方案落地每日任务：
- * wrangler.toml 的 [triggers] crons 会在 04:00 触发 Worker，
- * 但 Pages 项目的 worker 没有 scheduled 导出 —— 因此实际执行走 HTTP 接口。
- *
- * 本文件提供的是给 Workers Cron 用的轻量 endpoint 语义说明与本地可复用的 runner，
- * 线上请用 GitHub Actions 或 Cloudflare Cron 调用：
- *   POST /api/cron  （见 server/api/cron.post.ts）
- */
-
 import { runCheck } from '../utils/scheduler'
 import { refetchOfficial } from '../scrape/official'
 import { warmupRates } from '../utils/rates'
+import { flushMongo } from '../utils/mongodb'
 
+/**
+ * 每日任务聚合：检测 → 官方套餐抓取 → 汇率刷新 → 刷盘
+ * 给 Cloudflare Cron / GitHub Actions / 任意外部调度器调用。
+ * 每步独立 try/catch，任一失败不阻断其余步骤。
+ */
 export interface CronResult {
   checkedAt: string
   check: { up: number; down: number; total: number } | null
   refetch: { ok: string[]; fail: string[]; totalPlans: number } | null
   rates: { usdCny: number; source: string } | null
+  storage: 'mongodb' | 'filesystem'
   errors: string[]
 }
 
-/**
- * 一次性把每日任务跑完：可用性检测 → 官方套餐抓取 → 汇率刷新。
- * 每步独立 try/catch，任一失败不阻断其余步骤。
- */
 export async function runDailyJob(): Promise<CronResult> {
   const errors: string[] = []
   const out: CronResult = {
@@ -34,6 +24,7 @@ export async function runDailyJob(): Promise<CronResult> {
     check: null,
     refetch: null,
     rates: null,
+    storage: process.env.MONGODB_URI ? 'mongodb' : 'filesystem',
     errors
   }
 
@@ -56,6 +47,13 @@ export async function runDailyJob(): Promise<CronResult> {
     out.rates = { usdCny: r.usdCny, source: r.source }
   } catch (e) {
     errors.push(`rates: ${(e as Error).message}`)
+  }
+
+  // 把内存里的脏数据一次性刷到 Mongo（保证 cron 跑完数据真落库）
+  try {
+    await flushMongo()
+  } catch (e) {
+    errors.push(`flush: ${(e as Error).message}`)
   }
 
   return out
