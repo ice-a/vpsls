@@ -1,0 +1,10 @@
+# Cloudflare Pages / Workers 部署配置
+# 构建：pnpm exec nuxi build --preset cloudflare_pages -> dist/
+name = "vpsls"
+compatibility_date = "2025-07-15"
+compatibility_flags = ["nodejs_compat"]
+pages_build_output_dir = "dist"
+
+# 每日可用性检测 + 官方套餐抓取（替代进程内 setTimeout，Workers 上定时器会被冻结）
+[triggers]
+crons = ["0 4 * * *"]
